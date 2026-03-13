@@ -1,6 +1,6 @@
 {
   "name": "@novadi/core",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Annotation-free, Autofac-style dependency injection container for TypeScript",
   "type": "module",
   "main": "./dist/index.js",
@@ -31,7 +31,8 @@
     "build:lib": "tsc -p tsconfig.json",
     "build:unplugin": "tsup",
     "typecheck": "tsc --noEmit",
-    "prepare": "ts-patch install -s"
+    "prepare": "ts-patch install -s",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "dependency-injection",
@@ -52,6 +53,10 @@
   "homepage": "https://github.com/janus007/NovaDI#readme",
   "bugs": {
     "url": "https://github.com/janus007/NovaDI/issues"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   },
   "files": [
     "dist",

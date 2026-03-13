@@ -150,8 +150,49 @@ export function resolveByMapResolvers(
 
 
 /**
+ * Resolve dependencies using combined mapResolvers + map strategy
+ * map entries override mapResolvers at matching parameter positions
+ */
+export function resolveByMapWithResolvers(
+  constructor: new (...args: any[]) => any,
+  container: Container,
+  options: AutoWireOptions
+): any[] {
+  const paramNames = extractParameterNames(constructor)
+  const resolvedDeps: any[] = []
+  const maxLen = Math.max(options.mapResolvers!.length, paramNames.length)
+
+  for (let i = 0; i < maxLen; i++) {
+    const paramName = paramNames[i]
+    const mapResolver = paramName && options.map ? options.map[paramName] : undefined
+
+    if (mapResolver !== undefined) {
+      // Map entry wins (user override)
+      if (typeof mapResolver === 'function') {
+        resolvedDeps.push(mapResolver(container))
+      } else {
+        resolvedDeps.push(container.resolve(mapResolver as Token<any>))
+      }
+    } else if (i < options.mapResolvers!.length && options.mapResolvers![i] !== undefined) {
+      // Fall back to mapResolvers (transformer-generated)
+      const resolver = options.mapResolvers![i]!
+      if (typeof resolver === 'function') {
+        resolvedDeps.push(resolver(container))
+      } else {
+        resolvedDeps.push(container.resolve(resolver as Token<any>))
+      }
+    } else {
+      resolvedDeps.push(undefined)
+    }
+  }
+
+  return resolvedDeps
+}
+
+
+/**
  * Main autowire function - dispatches to appropriate strategy
- * Priority: mapResolvers (transformer-generated) > map (manual override)
+ * Priority: combined (both) > mapResolvers (transformer-generated) > map (manual override)
  */
 export function autowire(
   constructor: new (...args: any[]) => any,
@@ -164,13 +205,17 @@ export function autowire(
     ...options
   }
 
-  // HIGHEST PRIORITY: mapResolvers array (transformer-generated, optimal performance)
-  // O(1) array access per parameter - minification-safe and refactoring-friendly
+  // COMBINED: When both exist, map overrides mapResolvers for matching params
+  if (opts.mapResolvers && opts.mapResolvers.length > 0 && opts.map && Object.keys(opts.map).length > 0) {
+    return resolveByMapWithResolvers(constructor, container, opts)
+  }
+
+  // mapResolvers only (transformer-generated, optimal performance)
   if (opts.mapResolvers && opts.mapResolvers.length > 0) {
     return resolveByMapResolvers(constructor, container, opts)
   }
 
-  // FALLBACK: Manual map strategy for explicit overrides
+  // map only (manual override)
   if (opts.map && Object.keys(opts.map).length > 0) {
     return resolveByMap(constructor, container, opts)
   }

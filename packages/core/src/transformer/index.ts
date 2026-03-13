@@ -453,7 +453,32 @@ function transformDefaultAutowiring(
   context: ts.TransformationContext,
   checker: ts.TypeChecker
 ): ts.Node {
-  // Check if this is a method chain that should be transformed
+  // MERGE PATH: Check if this is .autoWire({ map: {...} }) with .registerType().as() in inner chain
+  // When user writes .autoWire({ map: {...} }), we merge transformer-generated mapResolvers into it
+  if (ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === 'autoWire' &&
+      node.arguments.length > 0 &&
+      ts.isObjectLiteralExpression(node.arguments[0])) {
+
+    const autoWireArg = node.arguments[0] as ts.ObjectLiteralExpression
+
+    const hasMap = autoWireArg.properties.some(p =>
+      ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && p.name.text === 'map')
+    const alreadyHasMapResolvers = autoWireArg.properties.some(p =>
+      ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && p.name.text === 'mapResolvers')
+
+    if (hasMap && !alreadyHasMapResolvers) {
+      const innerExpr = node.expression.expression
+      if (ts.isCallExpression(innerExpr)) {
+        const merged = tryMergeMapResolversIntoAutoWire(node, innerExpr, context, checker)
+        if (merged) {
+          return merged
+        }
+      }
+    }
+  }
+
+  // INJECT PATH: Check if this is a method chain that should be transformed
   const chain = getMethodChain(node)
   const { shouldTransform, registerTypeIndex } = shouldTransformForAutowiring(node, chain)
 
@@ -551,6 +576,11 @@ function getInterfaceNameFromType(type: ts.Type): string | null {
       type.flags & ts.TypeFlags.Any ||
       type.flags & ts.TypeFlags.Unknown ||
       type.flags & ts.TypeFlags.Void) {
+    return null
+  }
+
+  // Skip function types (callbacks like () => EditorState)
+  if (type.getCallSignatures().length > 0) {
     return null
   }
 
@@ -670,6 +700,48 @@ function findClassDeclarationInChain(
 }
 
 /**
+ * Build resolver expression AST nodes from parameter info entries.
+ * Reusable by both createAutoWireMapResolversCall and merge logic.
+ */
+function createResolverExpressions(
+  entries: Array<ParameterInfo>,
+  factory: ts.NodeFactory
+): ts.Expression[] {
+  return entries.map(entry => {
+    if (entry.typeName === null) {
+      // Primitive type → undefined
+      return factory.createIdentifier('undefined')
+    } else if (entry.isArray) {
+      // Array type → (c) => c.resolveTypeAll("TypeName")
+      return factory.createArrowFunction(
+        undefined, undefined,
+        [factory.createParameterDeclaration(undefined, undefined, 'c', undefined, undefined, undefined)],
+        undefined,
+        factory.createToken(ts.SyntaxKind.EqualsGreaterThanToken),
+        factory.createCallExpression(
+          factory.createPropertyAccessExpression(factory.createIdentifier('c'), 'resolveTypeAll'),
+          undefined,
+          [factory.createStringLiteral(entry.typeName)]
+        )
+      )
+    } else {
+      // Single interface type → (c) => c.resolveType("TypeName")
+      return factory.createArrowFunction(
+        undefined, undefined,
+        [factory.createParameterDeclaration(undefined, undefined, 'c', undefined, undefined, undefined)],
+        undefined,
+        factory.createToken(ts.SyntaxKind.EqualsGreaterThanToken),
+        factory.createCallExpression(
+          factory.createPropertyAccessExpression(factory.createIdentifier('c'), 'resolveType'),
+          undefined,
+          [factory.createStringLiteral(entry.typeName)]
+        )
+      )
+    }
+  })
+}
+
+/**
  * Create AST for .autoWire({ mapResolvers: [(c) => c.resolveType("IEventBus"), undefined, ...] })
  * Array-based autowiring with optimal O(1) performance
  * Minification-safe and refactoring-friendly (transformer regenerates on recompile)
@@ -680,64 +752,7 @@ function createAutoWireMapResolversCall(
   context: ts.TransformationContext
 ): ts.CallExpression {
   const factory = context.factory
-
-  // Create array of resolvers: [(c) => c.resolveType("TypeName"), (c) => c.resolveTypeAll("IPlugin"), undefined, ...]
-  const resolverExpressions = entries.map(entry => {
-    if (entry.typeName === null) {
-      // Primitive type → undefined
-      return factory.createIdentifier('undefined')
-    } else if (entry.isArray) {
-      // Array type → (c) => c.resolveTypeAll("TypeName")
-      return factory.createArrowFunction(
-        undefined, // modifiers
-        undefined, // type parameters
-        [factory.createParameterDeclaration(
-          undefined, // modifiers
-          undefined, // dotDotDotToken
-          'c', // name
-          undefined, // questionToken
-          undefined, // type
-          undefined  // initializer
-        )],
-        undefined, // type
-        factory.createToken(ts.SyntaxKind.EqualsGreaterThanToken),
-        // c.resolveTypeAll("TypeName")
-        factory.createCallExpression(
-          factory.createPropertyAccessExpression(
-            factory.createIdentifier('c'),
-            'resolveTypeAll'
-          ),
-          undefined,
-          [factory.createStringLiteral(entry.typeName)]
-        )
-      )
-    } else {
-      // Single interface type → (c) => c.resolveType("TypeName")
-      return factory.createArrowFunction(
-        undefined, // modifiers
-        undefined, // type parameters
-        [factory.createParameterDeclaration(
-          undefined, // modifiers
-          undefined, // dotDotDotToken
-          'c', // name
-          undefined, // questionToken
-          undefined, // type
-          undefined  // initializer
-        )],
-        undefined, // type
-        factory.createToken(ts.SyntaxKind.EqualsGreaterThanToken),
-        // c.resolveType("TypeName")
-        factory.createCallExpression(
-          factory.createPropertyAccessExpression(
-            factory.createIdentifier('c'),
-            'resolveType'
-          ),
-          undefined,
-          [factory.createStringLiteral(entry.typeName)]
-        )
-      )
-    }
-  })
+  const resolverExpressions = createResolverExpressions(entries, factory)
 
   // Create: { mapResolvers: [...] }
   const configObject = factory.createObjectLiteralExpression([
@@ -755,6 +770,107 @@ function createAutoWireMapResolversCall(
     ),
     undefined,
     [configObject]
+  )
+}
+
+/**
+ * Recursively transform .resolveType<T>(), .resolveTypeAll<T>(), .as<T>(), and
+ * .bindInterface<T>() calls within a node. Used to process the existing autoWire
+ * argument properties (map values) during merge, since the main visitor won't
+ * visit children of a node returned by transformDefaultAutowiring.
+ */
+function transformTypeCallsInNode(
+  node: ts.Node,
+  context: ts.TransformationContext
+): ts.Node {
+  function visitor(n: ts.Node): ts.Node {
+    if (ts.isCallExpression(n)) {
+      let result: ts.Node = transformResolveInterface(n, context)
+      if (result !== n) return ts.visitEachChild(result, visitor, context)
+
+      result = transformAsInterface(n, context)
+      if (result !== n) return ts.visitEachChild(result, visitor, context)
+
+      result = transformBindInterface(n, context)
+      if (result !== n) return ts.visitEachChild(result, visitor, context)
+    }
+    return ts.visitEachChild(n, visitor, context)
+  }
+  return ts.visitNode(node, visitor) as ts.Node
+}
+
+/**
+ * Try to merge mapResolvers into an existing .autoWire({ map: {...} }) call.
+ * Walks the inner chain to find .registerType().as(), extracts parameters,
+ * and adds mapResolvers to the existing autoWire argument.
+ * Returns the merged node, or null if merge isn't applicable.
+ */
+function tryMergeMapResolversIntoAutoWire(
+  autoWireCallNode: ts.CallExpression,
+  innerChainExpr: ts.CallExpression,
+  context: ts.TransformationContext,
+  checker: ts.TypeChecker
+): ts.Node | null {
+  const innerChain = getMethodChain(innerChainExpr)
+
+  // Find .registerType() in the inner chain
+  const registerTypeCall = innerChain.find(call =>
+    ts.isPropertyAccessExpression(call.expression) &&
+    call.expression.name.text === 'registerType')
+
+  if (!registerTypeCall || registerTypeCall.arguments.length === 0) {
+    return null
+  }
+
+  // Verify chain has .as() or .asDefaultInterface()
+  const hasAs = innerChain.some(call =>
+    ts.isPropertyAccessExpression(call.expression) &&
+    (call.expression.name.text === 'as' || call.expression.name.text === 'asDefaultInterface'))
+
+  if (!hasAs) {
+    return null
+  }
+
+  // Extract parameters and generate resolver entries
+  const resolverEntries = extractParameters(innerChainExpr, registerTypeCall, checker)
+  if (resolverEntries.length === 0 || resolverEntries.every(e => e.typeName === null)) {
+    return null // No resolvable params
+  }
+
+  const factory = context.factory
+
+  // Build resolver expression AST nodes
+  const resolverExpressions = createResolverExpressions(resolverEntries, factory)
+
+  // Create mapResolvers property assignment
+  const mapResolversProperty = factory.createPropertyAssignment(
+    'mapResolvers',
+    factory.createArrayLiteralExpression(resolverExpressions, true)
+  )
+
+  // Transform existing arg properties to handle .resolveType<T>() etc. inside map values
+  const existingArg = autoWireCallNode.arguments[0] as ts.ObjectLiteralExpression
+  const transformedExistingArg = transformTypeCallsInNode(existingArg, context) as ts.ObjectLiteralExpression
+
+  // Merge: prepend mapResolvers to existing properties (which contain map)
+  const mergedArg = factory.updateObjectLiteralExpression(
+    transformedExistingArg,
+    [mapResolversProperty, ...transformedExistingArg.properties]
+  )
+
+  // Transform inner chain to inject type names (.as<T>() → .as<T>("TypeName"))
+  const transformedInner = ensureTypeNamesInjected(innerChainExpr, context)
+
+  // Update the .autoWire() call with merged arg and transformed inner expression
+  return factory.updateCallExpression(
+    autoWireCallNode,
+    factory.updatePropertyAccessExpression(
+      autoWireCallNode.expression as ts.PropertyAccessExpression,
+      transformedInner,
+      (autoWireCallNode.expression as ts.PropertyAccessExpression).name
+    ),
+    autoWireCallNode.typeArguments,
+    [mergedArg]
   )
 }
 

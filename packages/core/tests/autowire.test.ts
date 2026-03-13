@@ -432,3 +432,99 @@ describe('Autowire - Error Handling', () => {
   })
 })
 
+describe('Autowire - Combined mapResolvers + map resolution (Bug 2)', () => {
+  let container: Container
+
+  beforeEach(() => {
+    container = new Container()
+  })
+
+  it('should use map entries to fill undefined positions in mapResolvers', () => {
+    // Simulates what a fixed transformer would produce:
+    // typed params get resolvers in mapResolvers, primitive params get undefined,
+    // and the map provides resolvers for those undefined positions
+
+    interface ILogger {
+      log(msg: string): void
+    }
+
+    class Logger implements ILogger {
+      log(msg: string) {}
+    }
+
+    // Use param names that don't conflict with outer scope variables
+    // (TS compiler renames params that shadow outer vars like `container`)
+    class CaretManager {
+      constructor(
+        public logger: ILogger,
+        public containerEl: any,
+        public sizerEl: any,
+      ) {}
+    }
+
+    const htmlContainer = { id: 'container' }
+    const htmlSizer = { id: 'sizer' }
+
+    const builder = container.builder()
+    builder.registerType(Logger).as<ILogger>('ILogger')
+
+    // Manually provide combined options (simulating fixed transformer output)
+    builder.registerType(CaretManager).as<CaretManager>('CaretManager').autoWire({
+      mapResolvers: [
+        (c) => c.resolveType<ILogger>('ILogger'),
+        undefined,  // overridden by map.containerEl
+        undefined,  // overridden by map.sizerEl
+      ],
+      map: {
+        containerEl: () => htmlContainer,
+        sizerEl: () => htmlSizer,
+      }
+    })
+
+    const built = builder.build()
+    const mgr = built.resolveType<CaretManager>('CaretManager')
+
+    expect(mgr.logger).toBeInstanceOf(Logger)
+    expect(mgr.containerEl).toBe(htmlContainer)
+    expect(mgr.sizerEl).toBe(htmlSizer)
+  })
+
+  it('should let map entries override non-undefined mapResolvers at matching positions', () => {
+    // When a map entry exists for a position that also has a mapResolver,
+    // the map entry should win
+
+    class DefaultLogger {
+      log(msg: string) {}
+    }
+
+    class CustomLogger {
+      log(msg: string) {}
+    }
+
+    class Service {
+      constructor(
+        public logger: any,
+      ) {}
+    }
+
+    const customLogger = new CustomLogger()
+
+    const builder = container.builder()
+    builder.registerType(DefaultLogger).as<DefaultLogger>('DefaultLogger')
+
+    builder.registerType(Service).as<Service>('Service').autoWire({
+      mapResolvers: [
+        (c) => c.resolveType<DefaultLogger>('DefaultLogger'),
+      ],
+      map: {
+        logger: () => customLogger,  // Override the auto-resolved logger
+      }
+    })
+
+    const built = builder.build()
+    const svc = built.resolveType<Service>('Service')
+
+    expect(svc.logger).toBe(customLogger)
+  })
+})
+

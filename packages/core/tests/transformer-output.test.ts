@@ -102,3 +102,163 @@ describe('Transformer - MapResolvers AutoWire Generation', () => {
     expect((service.logger as Logger).config).toBeInstanceOf(Config)
   })
 })
+
+describe('Transformer - Function type handling (Bug 3)', () => {
+  let container: Container
+
+  beforeEach(() => {
+    container = new Container()
+  })
+
+  it('should not generate resolvers for function-typed parameters', () => {
+    // Function-typed params like () => string should produce undefined
+    // in mapResolvers, not (c) => c.resolveType("__type")
+
+    class CommandExecutor {
+      execute() { return 'executed' }
+    }
+
+    class ClipboardHandler {
+      constructor(
+        public executor: CommandExecutor,
+        public getState: () => string,
+      ) {}
+    }
+
+    const builder = container.builder()
+    builder.registerType(CommandExecutor).as<CommandExecutor>()
+
+    // No explicit .autoWire() — transformer should inject one with:
+    // mapResolvers: [(c) => c.resolveType("CommandExecutor"), undefined]
+    // NOT: [(c) => c.resolveType("CommandExecutor"), (c) => c.resolveType("__type")]
+    builder.registerType(ClipboardHandler).as<ClipboardHandler>()
+
+    const built = builder.build()
+
+    // Should NOT throw — function param should get undefined, not attempt to resolve "__type"
+    const handler = built.resolveType<ClipboardHandler>('ClipboardHandler')
+
+    expect(handler.executor).toBeInstanceOf(CommandExecutor)
+    expect(handler.getState).toBeUndefined()
+  })
+
+  it('should handle multiple callback params alongside typed params', () => {
+    class CommandExecutor {
+      execute() { return 'executed' }
+    }
+
+    class Handler {
+      constructor(
+        public executor: CommandExecutor,
+        public getState: () => string,
+        public applyState: (state: string) => void,
+        public onDebug?: (msg: string) => void,
+      ) {}
+    }
+
+    const builder = container.builder()
+    builder.registerType(CommandExecutor).as<CommandExecutor>()
+    builder.registerType(Handler).as<Handler>()
+
+    const built = builder.build()
+
+    const handler = built.resolveType<Handler>('Handler')
+
+    expect(handler.executor).toBeInstanceOf(CommandExecutor)
+    expect(handler.getState).toBeUndefined()
+    expect(handler.applyState).toBeUndefined()
+    expect(handler.onDebug).toBeUndefined()
+  })
+})
+
+describe('Transformer - Merge mapResolvers into existing autoWire (Bug 1)', () => {
+  let container: Container
+
+  beforeEach(() => {
+    container = new Container()
+  })
+
+  it('should merge transformer-generated mapResolvers with user-provided map', () => {
+    // When user writes .autoWire({ map: {...} }), the transformer should
+    // merge mapResolvers into the same call, not add a second .autoWire()
+
+    class CaretRenderer {
+      render() { return 'rendered' }
+    }
+
+    // Use param names that don't conflict with outer scope `container` variable
+    interface ICaretManager {
+      caretRenderer: CaretRenderer
+      containerEl: any
+      sizerEl: any
+    }
+
+    class CaretManager implements ICaretManager {
+      constructor(
+        public caretRenderer: CaretRenderer,
+        public containerEl: any,
+        public sizerEl: any,
+      ) {}
+    }
+
+    const htmlContainer = { id: 'container' }
+    const htmlSizer = { id: 'sizer' }
+
+    const builder = container.builder()
+    builder.registerType(CaretRenderer).as<CaretRenderer>()
+
+    // User provides map for primitive params
+    // Transformer should merge mapResolvers for typed params into this same call
+    builder.registerType(CaretManager).as<ICaretManager>().singleInstance().autoWire({
+      map: {
+        containerEl: () => htmlContainer,
+        sizerEl: () => htmlSizer,
+      }
+    })
+
+    const built = builder.build()
+    const mgr = built.resolveType<ICaretManager>('ICaretManager')
+
+    // caretRenderer should be auto-resolved via transformer-generated mapResolvers
+    expect(mgr.caretRenderer).toBeInstanceOf(CaretRenderer)
+    // containerEl and sizerEl should come from user-provided map
+    expect(mgr.containerEl).toBe(htmlContainer)
+    expect(mgr.sizerEl).toBe(htmlSizer)
+  })
+
+  it('should handle callback params with user-provided map and typed auto-resolve', () => {
+    // Full pipeline test: callback types + merge + combined resolution
+
+    class CommandExecutor {
+      execute() { return 'executed' }
+    }
+
+    interface IClipboardHandler {
+      executor: CommandExecutor
+      getState: () => string
+    }
+
+    class ClipboardHandler implements IClipboardHandler {
+      constructor(
+        public executor: CommandExecutor,
+        public getState: () => string,
+      ) {}
+    }
+
+    const getStateFn = () => 'some state'
+
+    const builder = container.builder()
+    builder.registerType(CommandExecutor).as<CommandExecutor>()
+    builder.registerType(ClipboardHandler).as<IClipboardHandler>().autoWire({
+      map: {
+        getState: () => getStateFn,
+      }
+    })
+
+    const built = builder.build()
+    const handler = built.resolveType<IClipboardHandler>('IClipboardHandler')
+
+    expect(handler.executor).toBeInstanceOf(CommandExecutor)
+    expect(handler.getState).toBe(getStateFn)
+  })
+})

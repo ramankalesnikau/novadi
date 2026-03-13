@@ -31,7 +31,7 @@ export interface NovadiPluginOptions {
   /**
    * Enable automatic autowiring with TypeScript Program
    * Requires TypeScript type checking - adds ~500ms to initial build
-   * @default false
+   * @default true
    */
   enableAutowiring?: boolean
 
@@ -50,7 +50,7 @@ export function resolveOptions(
     include: options.include ?? [/\.[jt]sx?$/],
     exclude: options.exclude ?? [/node_modules/],
     compilerOptions: options.compilerOptions ?? {},
-    enableAutowiring: options.enableAutowiring ?? false,
+    enableAutowiring: options.enableAutowiring ?? true,
     performanceLogging: options.performanceLogging ?? false
   }
 }
