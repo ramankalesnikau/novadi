@@ -130,6 +130,8 @@ require('esbuild').build({
 })
 ```
 
+> **Note:** the unplugin transform emits modified **TypeScript**, not JavaScript — it only injects type names, and leaves stripping TS syntax to your existing toolchain. This is transparent for **Vite** and **esbuild** (both already strip TS after the plugin runs). For **webpack**/**Rspack**, make sure a TS-aware loader (`ts-loader`, `babel-loader`, or the built-in SWC loader) is configured for `.ts`/`.tsx` files alongside `NovadiUnplugin.webpack()`. For **Rollup**, add `@rollup/plugin-typescript` (or `rollup-plugin-esbuild`) to the `plugins` array — `NovadiUnplugin.rollup()` alone will no longer compile TypeScript down to JavaScript.
+
 #### Option 2: TypeScript Compiler (tsc)
 
 For direct `tsc` compilation, use `ts-patch`:

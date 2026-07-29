@@ -63,6 +63,7 @@ export const NovadiUnplugin = createUnplugin<NovadiPluginOptions | undefined>((o
 
   return {
     name: 'novadi',
+    enforce: 'pre', // Run before webpack/rspack loaders (Vite uses vite.enforce below instead)
 
     // Build start hook - create TypeScript Program once
     buildStart() {
@@ -189,8 +190,7 @@ export const NovadiUnplugin = createUnplugin<NovadiPluginOptions | undefined>((o
       const startTime = performance.now()
 
       const result = transformCode(code, id, cachedProgram, {
-        debug: resolvedOptions.debug,
-        compilerOptions: resolvedOptions.compilerOptions
+        debug: resolvedOptions.debug
       })
 
       // Return undefined to skip transformation (unplugin convention)

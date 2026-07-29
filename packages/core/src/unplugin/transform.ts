@@ -9,8 +9,23 @@ import novadiTransformer from '../transformer/index.js'
 export interface TransformOptions {
   /** Enable debug logging */
   debug?: boolean
-  /** Custom TypeScript compiler options */
-  compilerOptions?: ts.CompilerOptions
+}
+
+/** Wraps novadiTransformer to detect whether it changed the file, by reference equality. */
+function trackedNovadiTransformer(
+  program: ts.Program | null,
+  onChange: () => void
+): ts.TransformerFactory<ts.SourceFile> {
+  return context => {
+    const run = novadiTransformer(program)(context)
+    return (sourceFile) => {
+      const transformed = run(sourceFile)
+      if (transformed !== sourceFile) {
+        onChange()
+      }
+      return transformed
+    }
+  }
 }
 
 /**
@@ -47,61 +62,33 @@ export function transformCode(
   }
 
   try {
-    // Use Program's sourceFile if available (enables cross-file type resolution)
-    // Fallback to standalone sourceFile if not in Program
-    let sourceFile = program?.getSourceFile(id)
+    // A Program-bound SourceFile lets the transformer's checker calls resolve
+    // types; an unbound one (Vite/Vitest, or files outside the Program) falls
+    // back to the transformer's own AST-based parameter inference.
+    const boundSourceFile = program?.getSourceFile(id) ?? null
+    const sourceFile =
+      boundSourceFile ??
+      ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true, id.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS)
 
-    if (!sourceFile) {
-      // File not in Program or no Program - create standalone sourceFile
-      sourceFile = ts.createSourceFile(
-        id,
-        code,
-        ts.ScriptTarget.Latest,
-        true,
-        id.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
-      )
-    }
+    let changed = false
+    const transformer = trackedNovadiTransformer(boundSourceFile ? program : null, () => { changed = true })
 
-    // Apply NovaDI transformer
-    // Pass program for full type checking and autowiring support
-    const result = ts.transform(sourceFile, [novadiTransformer(program)], {
-      target: ts.ScriptTarget.ES2020,
-      module: ts.ModuleKind.ESNext,
-      ...options.compilerOptions
-    })
+    const result = ts.transform(sourceFile, [transformer])
+    const [transformedSourceFile] = result.transformed
 
-    const transformedSourceFile = result.transformed[0]
-
-    // Print back to TypeScript code
-    const printer = ts.createPrinter()
-    const transformedTsCode = printer.printFile(transformedSourceFile as ts.SourceFile)
-
-    result.dispose()
-
-    // Check if code changed
-    if (code === transformedTsCode) {
-      // No changes needed
+    if (!changed) {
+      result.dispose()
       return null
     }
+
+    const printedCode = ts.createPrinter().printFile(transformedSourceFile)
+    result.dispose()
 
     if (options.debug) {
       console.log(`[NovaDI] ✓ Transformed ${id}`)
     }
 
-    // Transpile to JavaScript for universal bundler compatibility
-    // This ensures the transformer output works with all bundlers
-    const jsResult = ts.transpileModule(transformedTsCode, {
-      compilerOptions: {
-        target: ts.ScriptTarget.ES2020,
-        module: ts.ModuleKind.ESNext,
-        esModuleInterop: true,
-        skipLibCheck: true,
-        ...options.compilerOptions
-      },
-      fileName: id
-    })
-
-    return jsResult.outputText || null
+    return printedCode
   } catch (error) {
     // Log error but don't fail the build - fail gracefully
     console.error(`[NovaDI] Transform error in ${id}:`, error)
