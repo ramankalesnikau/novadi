@@ -27,7 +27,7 @@ import { createUnplugin } from 'unplugin'
 import * as ts from 'typescript'
 import * as path from 'path'
 import * as fs from 'fs'
-import { transformCode } from './transform.js'
+import { transformCode, resolveInternalProgramOptions } from './transform.js'
 import { resolveOptions, type NovadiPluginOptions } from './options.js'
 
 export type { NovadiPluginOptions } from './options.js'
@@ -132,7 +132,7 @@ export const NovadiUnplugin = createUnplugin<NovadiPluginOptions | undefined>((o
       // Create TypeScript Program
       cachedProgram = ts.createProgram({
         rootNames: parsedConfig.fileNames,
-        options: parsedConfig.options
+        options: resolveInternalProgramOptions(parsedConfig.options, resolvedOptions.sourceMap)
       })
 
       programCreateTime = performance.now() - startTime
@@ -190,7 +190,9 @@ export const NovadiUnplugin = createUnplugin<NovadiPluginOptions | undefined>((o
       const startTime = performance.now()
 
       const result = transformCode(code, id, cachedProgram, {
-        debug: resolvedOptions.debug
+        debug: resolvedOptions.debug,
+        compilerOptions: resolvedOptions.compilerOptions,
+        sourceMap: resolvedOptions.sourceMap
       })
 
       // Return undefined to skip transformation (unplugin convention)
@@ -207,8 +209,8 @@ export const NovadiUnplugin = createUnplugin<NovadiPluginOptions | undefined>((o
       }
 
       return {
-        code: result,
-        map: null // TODO: Add source map support in future
+        code: result.code,
+        map: result.map
       }
     },
 

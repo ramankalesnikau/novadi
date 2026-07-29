@@ -9,6 +9,34 @@ import novadiTransformer from '../transformer/index.js'
 export interface TransformOptions {
   /** Enable debug logging */
   debug?: boolean
+  /** Custom TypeScript compiler options */
+  compilerOptions?: ts.CompilerOptions
+  /** Emit a source map pointing back to the original file. @default false */
+  sourceMap?: boolean
+}
+
+export interface TransformResult {
+  /** Transformed JavaScript code */
+  code: string
+  /** Source map (JSON string) pointing back to the original source, or null if unavailable */
+  map: string | null
+}
+
+/** Options for the internal emit Program - overridden so Program.emit() can't no-op. */
+export function resolveInternalProgramOptions(
+  tsconfigOptions: ts.CompilerOptions,
+  sourceMap: boolean
+): ts.CompilerOptions {
+  return {
+    ...tsconfigOptions,
+    sourceMap,
+    inlineSources: sourceMap, // needed for the bundler to merge this map with others
+    noEmit: false,
+    declaration: false,
+    declarationMap: false,
+    composite: false,
+    incremental: false
+  }
 }
 
 /** Wraps novadiTransformer to detect whether it changed the file, by reference equality. */
@@ -34,14 +62,14 @@ function trackedNovadiTransformer(
  * @param id File path/identifier
  * @param program TypeScript Program for type checking (optional)
  * @param options Transform options
- * @returns Transformed code or null if no transformation needed
+ * @returns Transformed code + source map, or null if no transformation needed
  */
 export function transformCode(
   code: string,
   id: string,
   program: ts.Program | null,
   options: TransformOptions = {}
-): string | null {
+): TransformResult | null {
   // Skip non-TypeScript files
   if (!id.endsWith('.ts') && !id.endsWith('.tsx')) {
     return null
@@ -62,33 +90,70 @@ export function transformCode(
   }
 
   try {
-    // A Program-bound SourceFile lets the transformer's checker calls resolve
-    // types; an unbound one (Vite/Vitest, or files outside the Program) falls
-    // back to the transformer's own AST-based parameter inference.
-    const boundSourceFile = program?.getSourceFile(id) ?? null
-    const sourceFile =
-      boundSourceFile ??
-      ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true, id.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS)
+    // Must emit through this same Program: it won't re-bind an already-bound
+    // SourceFile, so a different Program would leave new nodes unparented.
+    const boundSourceFile = program?.getSourceFile(id)
 
-    let changed = false
-    const transformer = trackedNovadiTransformer(boundSourceFile ? program : null, () => { changed = true })
+    if (boundSourceFile && program) {
+      let changed = false
+      const transformer = trackedNovadiTransformer(program, () => { changed = true })
+      let outputCode: string | null = null
+      let outputMap: string | null = null
 
-    const result = ts.transform(sourceFile, [transformer])
-    const [transformedSourceFile] = result.transformed
+      program.emit(
+        boundSourceFile,
+        (fileName, data) => {
+          if (fileName.endsWith('.map')) {
+            outputMap = data
+          } else {
+            outputCode = data
+          }
+        },
+        undefined,
+        false,
+        { before: [transformer] }
+      )
 
-    if (!changed) {
-      result.dispose()
-      return null
+      if (changed && outputCode) {
+        if (options.debug) {
+          console.log(`[NovaDI] ✓ Transformed ${id}`)
+        }
+
+        return { code: outputCode, map: outputMap }
+      }
+
+      // Program.emit() silently no-ops outside its rootDir (e.g. a cross-package
+      // import) - fall through to transpileModule, which doesn't care.
     }
 
-    const printedCode = ts.createPrinter().printFile(transformedSourceFile)
-    result.dispose()
+    // Pass null: transpileModule parses a fresh, unbound SourceFile, and
+    // checker-based autowiring needs nodes from the Program it was built from.
+    let changed = false
+    const transformer = trackedNovadiTransformer(null, () => { changed = true })
+    const jsResult = ts.transpileModule(code, {
+      compilerOptions: {
+        target: options.compilerOptions?.target ?? ts.ScriptTarget.ES2020,
+        module: ts.ModuleKind.ESNext,
+        esModuleInterop: true,
+        skipLibCheck: true,
+        ...options.compilerOptions,
+        sourceMap: options.sourceMap ?? false,
+        inlineSources: options.sourceMap ?? false
+      },
+      fileName: id,
+      transformers: { before: [transformer] }
+    })
+
+    if (!changed) {
+      // No changes needed
+      return null
+    }
 
     if (options.debug) {
       console.log(`[NovaDI] ✓ Transformed ${id}`)
     }
 
-    return printedCode
+    return { code: jsResult.outputText, map: jsResult.sourceMapText ?? null }
   } catch (error) {
     // Log error but don't fail the build - fail gracefully
     console.error(`[NovaDI] Transform error in ${id}:`, error)
